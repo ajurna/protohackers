@@ -30,6 +30,7 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter):
         w.close()
     except ConnectionResetError:
         logger.error('Connection was reset')
+        w.close()
 
 
 def parse_response(data: bytes) -> dict:
@@ -64,4 +65,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info('Quitting')
+        quit()
