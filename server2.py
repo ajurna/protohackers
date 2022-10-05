@@ -22,7 +22,7 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter):
     logger.info('new session')
     try:
         while not r.at_eof():
-            msg = Message(*struct.unpack_from('>cll', await r.readexactly(9)))
+            msg = Message(*struct.unpack_from('>cii', await r.readexactly(9)))
             if msg.req == b'I':
                 price_data[msg.int_1] = msg.int_2
             if msg.req == b'Q':
@@ -31,7 +31,7 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter):
                     price = sum(values)//len(values)
                 except ZeroDivisionError:
                     price = 0
-                price_out = price.to_bytes(4, byteorder='big', signed=True)
+                price_out = struct.pack('>i', price)
                 logger.debug(f'{price_out=}')
                 w.write(price_out)
         w.close()
