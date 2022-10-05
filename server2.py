@@ -1,11 +1,20 @@
 import asyncio
-from loguru import logger
 import json
 import math
-from typing import Dict
+import struct
 from asyncio.exceptions import IncompleteReadError
+from typing import Dict, NamedTuple
+
+from loguru import logger
+
 HOST = "0.0.0.0"
 PORT = 40000
+
+
+class Message(NamedTuple):
+    req: str
+    int_1: int
+    int_2: int
 
 
 async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter):
@@ -13,13 +22,11 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter):
     logger.info('new session')
     try:
         while not r.at_eof():
-            msg_type = await r.readexactly(1)
-            int_1 = int.from_bytes(await r.readexactly(4), byteorder='big', signed=True)
-            int_2 = int.from_bytes(await r.readexactly(4), byteorder='big', signed=True)
-            if msg_type == b'I':
-                price_data[int_1] = int_2
-            if msg_type == b'Q':
-                values = [v for t, v in price_data.items() if int_1 <= t <= int_2]
+            msg = Message(*struct.unpack_from('>cll', await r.readexactly(9)))
+            if msg.req == b'I':
+                price_data[msg.int_1] = msg.int_2
+            if msg.req == b'Q':
+                values = [v for t, v in price_data.items() if msg.int_1 <= t <= msg.int_2]
                 try:
                     price = sum(values)//len(values)
                 except ZeroDivisionError:
