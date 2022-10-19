@@ -4,7 +4,6 @@ from loguru import logger
 
 class TcpServer:
     def __init__(self, host: str = '0.0.0.0', port: int = 40000):
-        self.connections = {}
         self.server = None
         self.host = host
         self.port = port

@@ -3,6 +3,8 @@ from typing import NamedTuple
 
 from loguru import logger
 
+from tcp import TcpServer
+
 HOST = "0.0.0.0"
 PORT = 40000
 
@@ -12,19 +14,11 @@ class ReaderWriter(NamedTuple):
     writer: asyncio.StreamWriter
 
 
-class ChatServer:
+class ChatServer(TcpServer):
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.connections = {}
-        self.server = None
-        self.host = host
-        self.port = port
-
-    async def start(self):
-        self.server = await asyncio.start_server(self.accept_connection, self.host, self.port)
-        async with self.server:
-            logger.info("Server Ready.")
-            await self.server.serve_forever()
 
     def broadcast(self, message: str, user=None):
         logger.info(message)
@@ -66,14 +60,10 @@ class ChatServer:
         writer.close()
 
 
-async def main():
-    server = ChatServer(HOST, PORT)
-    await server.start()
-
-
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        server = ChatServer(HOST, PORT)
+        asyncio.run(server.start())
     except KeyboardInterrupt:
         logger.info('Quitting')
         quit()

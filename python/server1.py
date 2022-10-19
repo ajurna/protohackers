@@ -10,7 +10,7 @@ PORT = 40000
 
 
 class PrimeTime(TcpServer):
-    def accept_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def accept_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             while not reader.at_eof():
                 data = await reader.readline()
@@ -57,5 +57,9 @@ class PrimeTime(TcpServer):
 
 
 if __name__ == "__main__":
-    server = PrimeTime()
-    server.start()
+    try:
+        server = PrimeTime()
+        asyncio.run(server.start())
+    except KeyboardInterrupt:
+        logger.info('Quitting')
+        quit()
