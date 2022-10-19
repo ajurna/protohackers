@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteTargetsManager">
+    <targets>
+      <target name="ajurna@jianproducts.com:22" type="ssh/sftp" uuid="054cce91-c970-4e8a-aae3-7dffc30c8543">
+        <config>
+          <option name="projectRootOnTarget" value="/home/ajurna/remote" />
+          <option name="serverName" value="ajurna@jianproducts.com:22 agent" />
+        </config>
+        <ContributedStateBase type="RsLanguageRuntime">
+          <config>
+            <option name="cargoPath" value="/home/ajurna/.cargo/bin/cargo" />
+            <option name="cargoVersion" value="1.64.0 (387270bc7 2022-09-16)" />
+            <option name="rustcPath" value="/home/ajurna/.cargo/bin/rustc" />
+            <option name="rustcVersion" value="1.64.0 (a55dd71d5 2022-09-19)" />
+          </config>
+        </ContributedStateBase>
+      </target>
+    </targets>
+  </component>
+</project>
