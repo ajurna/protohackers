@@ -17,11 +17,11 @@ class DBServer:
     
     def __init__(self):
         self.database = {}
+        self.transport = None
     
     def connection_made(self, transport):
         self.transport = transport
         
-
     def datagram_received(self, data, addr):
         message = data.decode()
         logger.info(f'Received : {message}')
@@ -36,6 +36,7 @@ class DBServer:
             self.transport.sendto(data.encode(), addr)
     
     def connection_lost(self, addr):
+        """ Do Nothing on Connection Lost"""
         pass
 
 
@@ -43,7 +44,7 @@ async def main():
     loop = asyncio.get_running_loop()
     logger.info("Server Ready.")
     transport, protocol = await loop.create_datagram_endpoint(
-        lambda: DBServer(),
+        DBServer(),
         local_addr=(HOST, PORT))
     try:
         await loop.create_future()

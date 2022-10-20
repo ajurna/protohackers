@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "protohackers"
+version = "0.1.0"
+description = ""
+authors = ["Peter Dwyer <peter.dwyer@clanwilliamhealth.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+loguru = "^0.6.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

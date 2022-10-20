@@ -9,7 +9,7 @@
       <excludeFolder url="file://$MODULE_DIR$/rust/server01/target" />
       <excludeFolder url="file://$MODULE_DIR$/rust/server02/target" />
     </content>
-    <orderEntry type="inheritedJdk" />
+    <orderEntry type="jdk" jdkName="Remote Python 3.8.10 (/home/ajurna/.virtualenvs/protohackers/bin/python)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
