@@ -7,7 +7,7 @@ import re
 class MobInTheMiddle(TcpServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.reg = re.compile(r'(?=\s|\b)7[a-zA-Z0-9]{25,34}(?=\s)')
+        self.reg = re.compile(r'(?=\b)7[a-zA-Z0-9]{25,34}(?=\s)')
 
     async def accept_connection(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
 
