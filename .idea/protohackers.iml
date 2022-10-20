@@ -6,10 +6,12 @@
       <sourceFolder url="file://$MODULE_DIR$/rust/server01/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/rust/server02/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/rust/server03/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/rust/server04/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/rust/server00/target" />
       <excludeFolder url="file://$MODULE_DIR$/rust/server01/target" />
       <excludeFolder url="file://$MODULE_DIR$/rust/server02/target" />
       <excludeFolder url="file://$MODULE_DIR$/rust/server03/target" />
+      <excludeFolder url="file://$MODULE_DIR$/rust/server04/target" />
     </content>
     <orderEntry type="jdk" jdkName="Remote Python 3.8.10 (/home/ajurna/.virtualenvs/protohackers/bin/python)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
