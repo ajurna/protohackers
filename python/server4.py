@@ -43,8 +43,9 @@ class DBServer:
 async def main():
     loop = asyncio.get_running_loop()
     logger.info("Server Ready.")
+    server = DBServer()
     transport, protocol = await loop.create_datagram_endpoint(
-        DBServer(),
+        server,
         local_addr=(HOST, PORT))
     try:
         await loop.create_future()
