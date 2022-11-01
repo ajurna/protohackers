@@ -7,6 +7,12 @@
           <option name="projectRootOnTarget" value="/home/ajurna/remote" />
           <option name="serverName" value="ajurna@jianproducts.com:22 agent" />
         </config>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config>
+            <option name="goPath" value="/usr/local/go" />
+            <option name="goRoot" value="/usr/local/go/bin/go" />
+          </config>
+        </ContributedStateBase>
         <ContributedStateBase type="RsLanguageRuntime">
           <config>
             <option name="cargoPath" value="/home/ajurna/.cargo/bin/cargo" />
