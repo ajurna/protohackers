@@ -2,6 +2,7 @@ extern crate core;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::task::ready;
 use std::thread::sleep;
 use std::time::Duration;
 use tokio::net::{TcpListener};
@@ -12,10 +13,12 @@ use tokio::sync::Mutex;
 type ConnectionHandler = Arc<Mutex<OwnedWriteHalf>>;
 type TicketsSent = Arc<Mutex<Vec<String>>>;
 struct Sighting {
-    plate: String,
-    timestamp: i32
+    mile: u16,
+    timestamp: u32
 }
-type SightingData = Arc<Mutex<HashMap<u16, Vec<Sighting>>>>;
+
+type RoadData = HashMap<String, Vec<Sighting>>;
+type SightingData = Arc<Mutex<HashMap<u16, RoadData>>>;
 type Dispachers = Arc<Mutex<HashMap<u16, Vec<ConnectionHandler>>>>;
 
 
@@ -29,9 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (mut socket, _) = listener.accept().await?;
         let data = data.clone();
         let dispatchers = dispatchers.clone();
-        let road: u16;
-        let mile: u16;
-        let limit: u16;
+        let road: u16 = 0;
+        let mile: u16 = 0;
+        let limit: u16 = 0;
         tokio::spawn(async move {
             let mut is_camera = false;
             let mut heart_beating = false;
@@ -50,8 +53,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
                 println!("{:?}", msg_type);
+                if msg_type == 0x20 { // Plate
+                    if !is_camera {
+                        continue;
+                    }
+                    let mut plate:Vec<char> = vec![];
+                    let mut plate = String::new();
+                    for _ in 0..reader.read_u8().await.unwrap() {
+                        plate.push(reader.read_u8().await.unwrap() as char)
 
-                if msg_type == 0x40 { // Heartbeat
+                    }
+                    let timestamp = reader.read_u32().await.unwrap();
+
+                    {
+                        let mut data = data.lock().await;
+                        if data.contains_key(&road) {
+                            let road_data = data.get(&road).unwrap();
+                            if road_data.contains_key(&plate) {
+                                let timestamps = road_data.get(&plate).unwrap();
+                                timestamps.clone().sort()
+                            }
+                        } else {
+                            let mut road_data: RoadData = HashMap::new();
+                            let mut timestamps: Vec<u32> = vec![];
+                            timestamps.push(timestamp);
+                            road_data.insert(plate, timestamps);
+                            data.insert(road, road_data);
+                        }
+
+                    }
+
+                } else if msg_type == 0x40 { // Heartbeat
                     let heartbeat_length = reader.read_u32().await.unwrap();
                     if heart_beating {
                         write_error(&writer, "bad heartbeat".to_owned()).await;
