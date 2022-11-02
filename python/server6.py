@@ -13,13 +13,27 @@ class Sighting(NamedTuple):
     timestamp: int
 
 
+class Ticket(NamedTuple):
+    plate: str
+    road: int
+    mile1: int
+    timestamp1: int
+    mile2: int
+    timestamp2: int
+    speed: int
+
+    def data(self) -> bytes:
+        return struct.pack(f">BB{len(self.plate)}sHHIHIH", 0x21, len(self.plate), self.plate.encode(), self.road,
+                           self.mile1, self.timestamp1, self.mile2, self.timestamp2, self.speed)
+
+
 class SpeedDaemon(TcpServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.roads = {}
         self.tickets = set()
         self.dispatchers = defaultdict(list)
-        self.ticket_queue = defaultdict(list)
+        self.ticket_queue = asyncio.Queue()
 
     async def read_u8(self, reader: asyncio.StreamReader) -> int:
         return struct.unpack(">B", await reader.readexactly(1))[0]
@@ -42,24 +56,22 @@ class SpeedDaemon(TcpServer):
 
     async def dispatcher(self):
         while True:
-            await asyncio.sleep(2)
-            # logger.info(f'Dispatcher Tick {self.ticket_queue=}')
-            for road, items in self.ticket_queue.items():
-                for writer in self.dispatchers[road].copy():
-                    await asyncio.sleep(0)
-                    writer: asyncio.StreamWriter
-                    socket = writer.get_extra_info(name='socket')
-                    if not socket._sock._closed:
-                        writer.write(b''.join(items))
-                        items.clear()
-                        await writer.drain()
-                    else:
-                        self.dispatchers[road].remove(writer)
+            ticket = await self.ticket_queue.get()
+            dispatchers_to_remove = []
+            for writer in self.dispatchers[ticket.road]:
+                writer: asyncio.StreamWriter
+                socket = writer.get_extra_info(name='socket')
+                if not socket._sock._closed:
+                    writer.write(ticket.data())
+                    break
+                else:
+                    dispatchers_to_remove.append(writer)
+            for writer in dispatchers_to_remove:
+                self.dispatchers[ticket.road].remove(writer)
 
     async def accept_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             while not reader.at_eof():
-                await asyncio.sleep(0)
                 msg_type = await self.read_u8(reader)
                 # logger.info(f"{msg_type=}")
                 if msg_type == 0x40:  # WantHeartbeat
@@ -87,7 +99,6 @@ class SpeedDaemon(TcpServer):
             self.roads[road] = {}
         # logger.info(f'Camera {road=} {mile=} {limit=}')
         while not reader.at_eof():
-            await asyncio.sleep(0)
             msg_type = await self.read_u8(reader)
 
             if msg_type == 0x20:
@@ -101,7 +112,12 @@ class SpeedDaemon(TcpServer):
                 if plate not in self.tickets and len(self.roads[road][plate]) > 1:
                     if sightings := await self.limit_broken(self.roads[road][plate], limit, plate):
                         self.tickets.add(plate)
-                        self.send_ticket(plate, road, sightings)
+                        await self.send_ticket(plate, road, sightings)
+            elif msg_type == 0x40:  # WantHeartbeat
+                heartbeat_time = await self.read_u32(reader)
+                logger.info(f'{heartbeat_time=}')
+                if heartbeat_time > 0:
+                    asyncio.create_task(self.heartbeat(reader, writer, heartbeat_time / 10))
             elif msg_type == 0x80:
                 await reader.readexactly(6)
                 await self.send_error(writer, 'Already Camera')
@@ -110,13 +126,14 @@ class SpeedDaemon(TcpServer):
                     await self.read_u16(reader)
                 await self.send_error(writer, 'Already Camera')
 
-    def send_ticket(self, plate, road, sightings: Tuple[Sighting, Sighting, int]):
+    async def send_ticket(self, plate, road, sightings: Tuple[Sighting, Sighting, int]):
         sighting1, sighting2, speed = sightings
-        data = struct.pack(f">BB{len(plate)}sHHIHIH", 0x21, len(plate), plate.encode(), road, sighting1.mile, sighting1.timestamp, sighting2.mile, sighting2.timestamp, speed)
-        self.ticket_queue[road].append(data)
-        # logger.info(f'Sending Ticket: {plate=} {road=} {sightings=}')
+        ticket = Ticket(plate, road, sighting1.mile, sighting1.timestamp, sighting2.mile, sighting2.timestamp, speed)
+        await self.ticket_queue.put(ticket)
+        logger.info(f'Sending Ticket: {ticket=}')
 
-    async def limit_broken(self, sightings: List[Sighting], limit: int, plate) -> Optional[Tuple[Sighting, Sighting, int]]:
+    async def limit_broken(self, sightings: List[Sighting], limit: int, plate) -> Optional[
+        Tuple[Sighting, Sighting, int]]:
         sightings.sort(key=lambda x: x[1])
         for sighting1, sighting2 in zip(sightings, sightings[1:]):
             time = abs(sighting2.timestamp - sighting1.timestamp)
@@ -125,14 +142,18 @@ class SpeedDaemon(TcpServer):
             # logger.info(f'limit: {plate=} {time=} {distance=} {speed=} {limit=}')
             if speed > limit:
                 # logger.info(f'Speed high: {sighting1=} {sighting2=}')
-                return sighting1, sighting2, int(round(speed, 0)*100)
+                return sighting1, sighting2, int(round(speed, 0) * 100)
 
     async def heartbeat(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, heartbeat: float):
         logger.info(f'Beating: {heartbeat}')
-        while not reader.at_eof():
-            await asyncio.sleep(heartbeat)
-            writer.write(b"\x41")
-            await writer.drain()
+        try:
+            while not reader.at_eof():
+                await asyncio.sleep(heartbeat)
+                # logger.info('Beat')
+                writer.write(b"\x41")
+                await writer.drain()
+        except ConnectionResetError:
+            return
 
 
 if __name__ == "__main__":
