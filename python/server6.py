@@ -16,11 +16,13 @@ class Conn(NamedTuple):
 class Sighting(NamedTuple):
     mile: int
     timestamp: int
+    day: int
 
 
 class Plate(NamedTuple):
     plate: str
     timestamp: int
+    day: int
 
 
 class Camera(NamedTuple):
@@ -47,7 +49,7 @@ class SpeedDaemon(TcpServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.roads = {}
-        self.tickets = set()
+        self.tickets = defaultdict(set)
         self.dispatchers = defaultdict(list)
         self.ticket_queue = asyncio.Queue()
 
@@ -60,11 +62,12 @@ class SpeedDaemon(TcpServer):
     async def read_u32(self, conn: Conn) -> int:
         return struct.unpack(">I", await conn.reader.readexactly(4))[0]
 
-    async def read_str(self, conn: Conn, length):
-        return "".join([chr(await self.read_u8(conn)) for _ in range(length)])
+    async def read_str(self, conn: Conn):
+        return "".join([chr(await self.read_u8(conn)) for _ in range(await self.read_u8(conn))])
 
     async def send_error(self, conn: Conn, message: str):
-        conn.writer.write(struct.pack(f">Bp", 0x10, message))
+        conn.writer.write(b'\x10')
+        conn.writer.write(struct.pack(f">B{len(message)}s", len(message),  message.encode()))
         await conn.writer.drain()
 
     async def start(self):
@@ -84,6 +87,7 @@ class SpeedDaemon(TcpServer):
                 conn.writer.write(ticket.data())
                 logger.info(f'ticket sent: {ticket=}')
                 ticket_sent = True
+                break
             if not ticket_sent:
                 await self.ticket_queue.put(ticket)
                 # logger.info(f'requeue ticket: {ticket=}')
@@ -92,10 +96,18 @@ class SpeedDaemon(TcpServer):
                 self.dispatchers[ticket.road].remove(conn)
 
     async def Plate(self, conn):
-        plate_length = await self.read_u8(conn)
-        plate = await self.read_str(conn, plate_length)
+        plate = await self.read_str(conn)
         timestamp = await self.read_u32(conn)
-        return Plate(plate, timestamp)
+        return Plate(plate, timestamp, timestamp//86400)
+
+    async def Ticket(self, conn):
+        plate = await self.read_str(conn)
+        road = await self.read_u16(conn)
+        mile1 = await self.read_u16(conn)
+        timestamp1 = await self.read_u32(conn)
+        mile2 = await self.read_u16(conn)
+        timestamp2 = await self.read_u32(conn)
+        speed = await self.read_u16(conn)
 
     async def WantHeartbeat(self, conn: Conn):
         heartbeat_time = await self.read_u32(conn)
@@ -116,13 +128,16 @@ class SpeedDaemon(TcpServer):
         logger.info(f"Sighting: {camera=} {plate=}")
         if plate.plate not in self.roads[camera.road]:
             self.roads[camera.road][plate.plate] = []
-        self.roads[camera.road][plate.plate].append(Sighting(camera.mile, plate.timestamp))
-        if plate.plate not in self.tickets and len(self.roads[camera.road][plate.plate]) > 1:
-            sightings = await self.limit_broken(self.roads[camera.road][plate.plate], camera.limit)
-            if sightings:
+        self.roads[camera.road][plate.plate].append(Sighting(camera.mile, plate.timestamp, plate.timestamp//86400))
+        if len(self.roads[camera.road][plate.plate]) > 1:
+            sightings_list = await self.limit_broken(self.roads[camera.road][plate.plate], camera.limit)
+            for sightings in sightings_list:
                 logger.info(f"Sighting: {camera=} {plate.plate=} {sightings=}")
-                self.tickets.add(plate.plate)
-                await self.send_ticket(plate, camera, sightings)
+                s1, s2, _ = sightings
+                if plate.plate not in self.tickets[s1.day] and plate.plate not in self.tickets[s2.day]:
+                    self.tickets[s1.day].add(plate.plate)
+                    self.tickets[s2.day].add(plate.plate)
+                    await self.send_ticket(plate, camera, sightings)
 
     async def accept_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         conn = Conn(reader, writer)
@@ -134,30 +149,47 @@ class SpeedDaemon(TcpServer):
                 msg_type = await self.read_u8(conn)
                 # logger.info(f"{msg_type=}")
                 match msg_type:
+                    case 0x10:
+                        await self.read_str(conn)
+                        await self.send_error(conn, 'no errors')
                     case 0x20:
                         plate = await self.Plate(conn)
                         if camera:
                             logger.info(f'Plate: {plate=}')
                             await self.add_sighting(plate, camera)
+                        else:
+                            await self.send_error(conn, 'no plates')
+                    case 0x21:
+                        await self.Ticket(conn)
+                        await self.send_error(conn, 'no tickets')
                     case 0x40:  # WantHeartbeat
                         heartbeat_time = await self.WantHeartbeat(conn)
                         if not heartbeat and heartbeat_time:
                             heartbeat = asyncio.create_task(self.heartbeat(conn, heartbeat_time / 10))
+                    case 0x41:
+                        await self.send_error(conn, 'no heartbeat')
                     case 0x80:
                         new_camera = await self.IAmCamera(conn)
-                        if not camera:
+                        if not camera and not dispatcher:
                             camera = new_camera
                             logger.info(f'Camera: {camera=}')
                             if camera.road not in self.roads:
                                 self.roads[camera.road] = {}
+                        else:
+                            logger.info('error on camera')
+                            await self.send_error(conn, 'already setup')
                     case 0x81:
                         roads = await self.IAmDispatcher(conn)
                         if not dispatcher and not camera:
                             dispatcher = roads
                             for road in roads:
                                 self.dispatchers[road].append(conn)
+                        else:
+                            await self.send_error(conn, 'already setup')
+                    case _:
+                        await self.send_error(conn, 'unknown message')
 
-        except IncompleteReadError:
+        except (IncompleteReadError, ConnectionResetError):
             logger.warning('Client Disconnected')
             if heartbeat:
                 heartbeat.cancel()
@@ -173,14 +205,16 @@ class SpeedDaemon(TcpServer):
     async def limit_broken(self, sightings: List[Sighting], limit: int) -> \
             Optional[Tuple[Sighting, Sighting, int]]:
         sightings.sort(key=lambda x: x[1])
+        tickets = []
         for sighting1, sighting2 in zip(sightings, sightings[1:]):
             time = abs(sighting2.timestamp - sighting1.timestamp)
             distance = abs(sighting2.mile - sighting1.mile)
-            speed = (distance / time) * 60 * 60
+            speed = int(round((distance / time) * 60 * 60))
             # logger.info(f'limit: {plate=} {time=} {distance=} {speed=} {limit=}')
             if speed > limit:
                 # logger.info(f'Speed high: {sighting1=} {sighting2=}')
-                return sighting1, sighting2, int(round(speed, 0) * 100)
+                tickets.append((sighting1, sighting2, speed * 100))
+        return tickets
 
     async def heartbeat(self, conn: Conn, heartbeat: float):
         logger.info(f'Beating: {heartbeat}')
