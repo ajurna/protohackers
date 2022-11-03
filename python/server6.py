@@ -1,7 +1,7 @@
 import struct
 from asyncio import IncompleteReadError
 from collections import defaultdict
-from typing import NamedTuple, List, Tuple, Optional
+from typing import NamedTuple, List, Tuple
 
 from tcp import TcpServer
 import asyncio
