@@ -8,9 +8,25 @@ import asyncio
 from loguru import logger
 
 
+class Conn(NamedTuple):
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+
+
 class Sighting(NamedTuple):
     mile: int
     timestamp: int
+
+
+class Plate(NamedTuple):
+    plate: str
+    timestamp: int
+
+
+class Camera(NamedTuple):
+    road: int
+    mile: int
+    limit: int
 
 
 class Ticket(NamedTuple):
@@ -35,18 +51,21 @@ class SpeedDaemon(TcpServer):
         self.dispatchers = defaultdict(list)
         self.ticket_queue = asyncio.Queue()
 
-    async def read_u8(self, reader: asyncio.StreamReader) -> int:
-        return struct.unpack(">B", await reader.readexactly(1))[0]
+    async def read_u8(self, conn: Conn) -> int:
+        return struct.unpack(">B", await conn.reader.readexactly(1))[0]
 
-    async def read_u16(self, reader: asyncio.StreamReader) -> int:
-        return struct.unpack(">H", await reader.readexactly(2))[0]
+    async def read_u16(self, conn: Conn) -> int:
+        return struct.unpack(">H", await conn.reader.readexactly(2))[0]
 
-    async def read_u32(self, reader: asyncio.StreamReader) -> int:
-        return struct.unpack(">I", await reader.readexactly(4))[0]
+    async def read_u32(self, conn: Conn) -> int:
+        return struct.unpack(">I", await conn.reader.readexactly(4))[0]
 
-    async def send_error(self, writer: asyncio.StreamWriter, message: str):
-        writer.write(struct.pack(f">Bp", 0x10, message))
-        await writer.drain()
+    async def read_str(self, conn: Conn, length):
+        return "".join([chr(await self.read_u8(conn)) for _ in range(length)])
+
+    async def send_error(self, conn: Conn, message: str):
+        conn.writer.write(struct.pack(f">Bp", 0x10, message))
+        await conn.writer.drain()
 
     async def start(self):
         self.server = await asyncio.start_server(self.accept_connection, self.host, self.port)
@@ -69,26 +88,71 @@ class SpeedDaemon(TcpServer):
             for writer in dispatchers_to_remove:
                 self.dispatchers[ticket.road].remove(writer)
 
-    async def accept_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        try:
-            while not reader.at_eof():
-                msg_type = await self.read_u8(reader)
-                # logger.info(f"{msg_type=}")
-                if msg_type == 0x40:  # WantHeartbeat
-                    heartbeat_time = await self.read_u32(reader)
-                    logger.info(f'{heartbeat_time=}')
-                    if heartbeat_time > 0:
-                        asyncio.create_task(self.heartbeat(reader, writer, heartbeat_time / 10))
-                elif msg_type == 0x80:  # IAmCamera
-                    await self.camera(reader, writer)
-                elif msg_type == 0x81:  # IAmDispatcher
-                    new_roads = []
-                    for _ in range(await self.read_u8(reader)):
-                        road = await self.read_u16(reader)
-                        new_roads.append(road)
-                        self.dispatchers[road].append(writer)
-                        # logger.info(f"Dispatcher: {new_roads=}")
+    async def Plate(self, conn):
+        plate_length = await self.read_u8(conn.reader)
+        plate = await self.read_str(conn, plate_length)
+        timestamp = await self.read_u32(conn)
+        return Plate(plate, timestamp)
 
+    async def WantHeartbeat(self, conn: Conn):
+        heartbeat_time = await self.read_u32(conn)
+        return heartbeat_time if heartbeat_time > 0 else None
+
+    async def IAmCamera(self, conn: Conn):
+        road, mile, limit = struct.unpack('>HHH', await conn.reader.readexactly(6))
+        return Camera(road, mile, limit)
+
+    async def IAmDispatcher(self, conn: Conn):
+        new_roads = []
+        for _ in range(await self.read_u8(conn)):
+            road = await self.read_u16(conn)
+            new_roads.append(road)
+        return new_roads
+
+    def add_sighting(self, plate):
+        pass
+
+    async def accept_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        conn = Conn(reader, writer)
+        heartbeat = None
+        dispatcher = False
+        camera = False
+        try:
+            while not conn.reader.at_eof():
+                msg_type = await self.read_u8(conn)
+                # logger.info(f"{msg_type=}")
+                match msg_type:
+                    case 0x20:
+                        plate = await self.Plate(conn)
+                        if camera:
+                            self.add_sighting(plate)  # TODO:
+                    case 0x40:  # WantHeartbeat
+                        heartbeat_time = await self.WantHeartbeat(conn)
+                        if not heartbeat and heartbeat_time:
+                            heartbeat = asyncio.create_task(self.heartbeat(reader, writer, heartbeat_time / 10))
+                    case 0x80:
+                        new_camera = await self.IAmCamera(conn)
+                        if not camera:
+                            camera = new_camera
+                            if camera.road not in self.roads:
+                                self.roads[camera.road] = {}
+                    case 0x81:
+                        roads = await self.IAmDispatcher(conn)
+                        if not dispatcher and not camera:
+                            for road in roads:
+                                self.dispatchers[road].append(conn)
+            if msg_type == 0x20:
+                plate_length = await self.read_u8(reader)
+                plate = "".join([chr(await self.read_u8(reader)) for _ in range(plate_length)])
+                timestamp = await self.read_u32(reader)
+                # logger.info(f"Plate: {plate=} {mile=} {timestamp=}")
+                if plate not in self.roads[road]:
+                    self.roads[road][plate] = []
+                self.roads[road][plate].append(Sighting(mile, timestamp))
+                if plate not in self.tickets and len(self.roads[road][plate]) > 1:
+                    if sightings := await self.limit_broken(self.roads[road][plate], limit, plate):
+                        self.tickets.add(plate)
+                        await self.send_ticket(plate, road, sightings)
         except IncompleteReadError:
             logger.error('Incomplete read error')
             writer.close()
@@ -100,6 +164,8 @@ class SpeedDaemon(TcpServer):
         # logger.info(f'Camera {road=} {mile=} {limit=}')
         while not reader.at_eof():
             msg_type = await self.read_u8(reader)
+
+
 
             if msg_type == 0x20:
                 plate_length = await self.read_u8(reader)
