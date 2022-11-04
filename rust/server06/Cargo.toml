@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+byteorder = "1.4.3"
+queues = "1.1.0"
