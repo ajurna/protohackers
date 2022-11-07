@@ -1,10 +1,10 @@
 extern crate core;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc};
 use std::thread::sleep;
 use std::time::Duration;
-use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
+use byteorder::{BigEndian, ByteOrder};
 use queues::{IsQueue, Queue};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
@@ -12,7 +12,6 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 
 type ConnectionHandler = Arc<Mutex<BufWriter<OwnedWriteHalf>>>;
-type TicketsSent = Arc<Mutex<Vec<String>>>;
 #[derive(Clone, Debug)]
 struct Sighting {
     mile: u16,
@@ -67,6 +66,7 @@ impl Ticket {
     }
 }
 type TicketQueue = Arc<Mutex<Queue<Ticket>>>;
+type TicketSent = Arc<Mutex<HashSet<(u32, String)>>>;
 
 #[derive(Debug)]
 struct Camera {
@@ -81,21 +81,26 @@ struct LimitBroke {
 }
 
 
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("0.0.0.0:40000").await?;
     let data: SightingData = Arc::new(Mutex::new(HashMap::new()));
     let dispatchers: Dispatchers = Arc::new(Mutex::new(HashMap::new()));
     let ticket_queue: TicketQueue = Arc::new(Mutex::new(Queue::new()));
+    let ticket_sent: TicketSent = Arc::new(Mutex::new(HashSet::new()));
 
     setup_dispatcher_thread(ticket_queue.clone(), dispatchers.clone()).await;
 
     println!("Ready to accept connections");
     loop {
-        let (mut socket, _) = listener.accept().await?;
+        println!("awaiting new connection");
+        let (socket, addr) = listener.accept().await?;
+        println!("new connection {:?}", addr.port());
         let data = data.clone();
         let dispatchers = dispatchers.clone();
         let ticket_queue = ticket_queue.clone();
+        let ticket_sent = ticket_sent.clone();
         tokio::spawn(async move {
             let mut camera: Option<Camera> = None;
             let mut heart_beating = false;
@@ -103,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let (mut reader, writer) = socket.into_split();
             let writer = BufWriter::new(writer);
-            let mut writer: ConnectionHandler = Arc::new(Mutex::new(writer));
+            let writer: ConnectionHandler = Arc::new(Mutex::new(writer));
 
             // In a loop, read data from the socket and write the data back.
             loop {
@@ -114,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return
                     }
                 };
-                // println!("{:?}", msg_type);
+                println!("{:?}", msg_type);
                 match msg_type {
                     0x10 => { // Error (Server->Client)
                         write_error(&writer, "Error not accepted".to_owned()).await
@@ -124,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("Plate: {:?}", plate);
                         match &camera {
                             Some(camera) => {
-                                add_sighting(camera, plate, &data, &ticket_queue).await;
+                                add_sighting(camera, plate, &data, &ticket_queue, &ticket_sent).await;
                                 ()
                             },
                             None => write_error(&writer, "Plates only from camera's".to_owned()).await,
@@ -135,11 +140,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     0x40 => { // WantHeartbeat (Client->Server)
                         if !heart_beating {
-                            setup_heartbeat(&writer, reader.read_u32().await.unwrap());
+                            setup_heartbeat(&writer, reader.read_u32().await.unwrap()).await;
                             heart_beating = true;
                         } else {
                             write_error(&writer, "Heartbeat Already Active".to_owned()).await
                         }
+                        println!("Heartbeat setup")
                     },
                     0x41 => { // Heartbeat (Server->Client)
                         write_error(&writer, "Heartbeat not accepted".to_owned()).await
@@ -161,7 +167,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if !is_dispatcher {
                             is_dispatcher = true;
                             add_dispatchers(&dispatchers, dispatcher_roads, &writer).await;
-                            println!("Dispatchers: {:?}", dispatchers)
                         }
                     },
                     _ => { // Invalid Message
@@ -169,13 +174,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                 }
-
             }
         });
     }
 }
 
-fn setup_heartbeat(writer: &ConnectionHandler, beat_length: u32){
+async fn setup_heartbeat(writer: &ConnectionHandler, beat_length: u32){
     if beat_length == 0 {
         return;
     }
@@ -207,7 +211,7 @@ async fn get_plate(reader: &mut OwnedReadHalf) -> Plate {
     Plate { plate, timestamp: reader.read_u32().await.unwrap() }
 }
 
-async fn add_sighting(camera: &Camera, plate: Plate, data: &SightingData, ticket_queue: &TicketQueue) {
+async fn add_sighting(camera: &Camera, plate: Plate, data: &SightingData, ticket_queue: &TicketQueue, ticket_sent: &TicketSent) {
     let mut data = data.lock().await;
     if !data.contains_key(&camera.road) {
         data.insert(camera.road.clone(), HashMap::new());
@@ -220,7 +224,13 @@ async fn add_sighting(camera: &Camera, plate: Plate, data: &SightingData, ticket
     data.get_mut(&camera.road).unwrap().get_mut(&plate.plate).unwrap().push(sighting);
     if data.get(&camera.road).unwrap().get(&plate.plate).unwrap().len() > 1 {
         for limit_broken in get_limit_broken(camera, data.get_mut(&camera.road).unwrap().get_mut(&plate.plate).unwrap()).await {
-            send_ticket(ticket_queue, &plate, &camera, limit_broken).await;
+            let ticket_tuple = (limit_broken.sighting1.day, plate.plate.to_owned());
+            let mut ticket_sent = ticket_sent.lock().await;
+            if !ticket_sent.contains(&ticket_tuple) {
+                send_ticket(ticket_queue, &plate, &camera, limit_broken).await;
+                ticket_sent.insert(ticket_tuple);
+            }
+
         }
     }
 }
@@ -272,7 +282,7 @@ async fn add_dispatchers(dispatchers: &Dispatchers, roads: Vec<Road>, writer: &C
 async fn setup_dispatcher_thread(ticket_queue: TicketQueue, dispatchers: Dispatchers) {
     tokio::spawn(async move {
         loop {
-            sleep(Duration::from_millis(500));
+            sleep(Duration::from_millis(1000));
             {
                 let mut ticket_queue = ticket_queue.lock().await;
                 for _ in 0..ticket_queue.size() {
