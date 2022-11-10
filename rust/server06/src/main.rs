@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc};
 use std::thread::sleep;
 use std::time::Duration;
-use byteorder::{BigEndian, ByteOrder};
 use queues::{IsQueue, Queue};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
@@ -47,21 +46,12 @@ impl Ticket {
         out.push(0x21 as u8);
         out.push(self.plate.len() as u8);
         out.extend(self.plate.as_bytes());
-
-        let mut buf2 = [0;2];
-        let mut buf4 = [0;4];
-        BigEndian::write_u16(&mut buf2, self.road);
-        out.extend(buf2);
-        BigEndian::write_u16(&mut buf2, self.mile1);
-        out.extend(buf2);
-        BigEndian::write_u32(&mut buf4, self.timestamp1);
-        out.extend(buf4);
-        BigEndian::write_u16(&mut buf2, self.mile2);
-        out.extend(buf2);
-        BigEndian::write_u32(&mut buf4, self.timestamp2);
-        out.extend(buf4);
-        BigEndian::write_u16(&mut buf2, self.speed);
-        out.extend(buf2);
+        out.extend(self.road.to_be_bytes());
+        out.extend(self.mile1.to_be_bytes());
+        out.extend(self.timestamp1.to_be_bytes());
+        out.extend(self.mile2.to_be_bytes());
+        out.extend(self.timestamp2.to_be_bytes());
+        out.extend(self.speed.to_be_bytes());
         return out
     }
 }
@@ -94,9 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Ready to accept connections");
     loop {
-        println!("awaiting new connection");
-        let (socket, addr) = listener.accept().await?;
-        println!("new connection {:?}", addr.port());
+        let (socket, _) = listener.accept().await?;
         let data = data.clone();
         let dispatchers = dispatchers.clone();
         let ticket_queue = ticket_queue.clone();
@@ -119,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return
                     }
                 };
-                println!("{:?}", msg_type);
+                // println!("{:?}", msg_type);
                 match msg_type {
                     0x10 => { // Error (Server->Client)
                         write_error(&writer, "Error not accepted".to_owned()).await
@@ -186,7 +174,6 @@ async fn setup_heartbeat(writer: &ConnectionHandler, beat_length: u32){
     let writer = writer.clone();
     let beat_length = Duration::from_millis((beat_length*100) as u64);
     tokio::spawn(async move {
-        println!("Heartbeat: {}", beat_length.as_millis());
         loop {
             sleep(beat_length);
             {
@@ -212,7 +199,9 @@ async fn get_plate(reader: &mut OwnedReadHalf) -> Plate {
 }
 
 async fn add_sighting(camera: &Camera, plate: Plate, data: &SightingData, ticket_queue: &TicketQueue, ticket_sent: &TicketSent) {
+    println!("sighting: requesting lock");
     let mut data = data.lock().await;
+    println!("sighting: lock acquired");
     if !data.contains_key(&camera.road) {
         data.insert(camera.road.clone(), HashMap::new());
     }
@@ -225,14 +214,17 @@ async fn add_sighting(camera: &Camera, plate: Plate, data: &SightingData, ticket
     if data.get(&camera.road).unwrap().get(&plate.plate).unwrap().len() > 1 {
         for limit_broken in get_limit_broken(camera, data.get_mut(&camera.road).unwrap().get_mut(&plate.plate).unwrap()).await {
             let ticket_tuple = (limit_broken.sighting1.day, plate.plate.to_owned());
+            println!("sighting: sent lock requested");
             let mut ticket_sent = ticket_sent.lock().await;
+            println!("sighting: sent lock acquired");
             if !ticket_sent.contains(&ticket_tuple) {
                 send_ticket(ticket_queue, &plate, &camera, limit_broken).await;
                 ticket_sent.insert(ticket_tuple);
             }
-
+            println!("sighting: sent lock released");
         }
     }
+    println!("sighting: lock released");
 }
 
 async fn get_limit_broken(camera: &Camera, sightings: &mut Vec<Sighting>) -> Vec<LimitBroke> {
@@ -255,7 +247,7 @@ async fn get_camera(reader: &mut OwnedReadHalf) -> Camera{
     let road = reader.read_u16().await.unwrap();
     let mile = reader.read_u16().await.unwrap();
     let limit = reader.read_u16().await.unwrap();
-    return Camera{road, mile, limit}
+    Camera{road, mile, limit}
 }
 
 async fn get_dispatcher(reader: &mut OwnedReadHalf) -> Vec<u16>{
@@ -288,27 +280,29 @@ async fn setup_dispatcher_thread(ticket_queue: TicketQueue, dispatchers: Dispatc
                 for _ in 0..ticket_queue.size() {
                     let ticket = ticket_queue.remove().unwrap();
                     let road = ticket.road as Road;
-                    let mut dispatchers = dispatchers.lock().await;
-                    let mut ticket_sent = false;
-                    if dispatchers.contains_key(&road) {
-                        while dispatchers.get(&road).unwrap().size() > 0 {
-                            let writer = dispatchers.get_mut(&road).unwrap().remove().unwrap();
-                            let mut writer_lock = writer.lock().await;
-                            writer_lock.write_all(&*ticket.to_bytes()).await.unwrap();
-                            match writer_lock.flush().await {
-                                Ok(_) => {
-                                    drop(writer_lock);
-                                    println!("Dispatchers sent: {:?}", ticket);
-                                    dispatchers.get_mut(&road).unwrap().add(writer).unwrap();
-                                    ticket_sent = true;
-                                    break
+                    {
+                        let mut dispatchers = dispatchers.lock().await;
+                        let mut ticket_sent = false;
+                        if dispatchers.contains_key(&road) {
+                            while dispatchers.get(&road).unwrap().size() > 0 {
+                                let writer = dispatchers.get_mut(&road).unwrap().remove().unwrap();
+                                let mut writer_lock = writer.lock().await;
+                                writer_lock.write_all(&*ticket.to_bytes()).await.unwrap();
+                                match writer_lock.flush().await {
+                                    Ok(_) => {
+                                        drop(writer_lock);
+                                        println!("Dispatchers sent: {:?}", ticket);
+                                        dispatchers.get_mut(&road).unwrap().add(writer).unwrap();
+                                        ticket_sent = true;
+                                        break;
+                                    }
+                                    Err(_) => continue
                                 }
-                                Err(_) => continue
                             }
                         }
-                    }
-                    if !ticket_sent {
-                        ticket_queue.add(ticket).unwrap();
+                        if !ticket_sent {
+                            ticket_queue.add(ticket).unwrap();
+                        }
                     }
                 }
             }
