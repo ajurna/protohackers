@@ -1,19 +1,13 @@
 import asyncio
 import re
 from dataclasses import dataclass
+from math import ceil
 from typing import Dict, NamedTuple
 from datetime import datetime, timedelta
 from loguru import logger
 
 HOST = "0.0.0.0"
 PORT = 54321
-
-class MessagePart(NamedTuple):
-    ord: int
-    data: str
-
-    def __str__(self):
-        return f"{{:{self.ord}d}}"
 
 
 class Session:
@@ -58,8 +52,7 @@ class Session:
                 self.buffer += v
                 to_remove.append(k)
             elif k < len(self.buffer):
-                 self.buffer = self.buffer[:k] + v + (self.buffer[k+len(v):] if k + len(v) < len(self.buffer) else '')
-        logger.debug(f"{self.session} {self.buffer}")
+                self.buffer = self.buffer[:k] + v + (self.buffer[k+len(v):] if k + len(v) < len(self.buffer) else '')
         for k in to_remove:
             del(self.data[k])
         self.send_message(f'/ack/{self.session}/{len(self.buffer)}/')
@@ -68,11 +61,21 @@ class Session:
             try:
                 ind = self.buffer.index('\n', self.sent_counter)
                 reversed_data: str = self.buffer[self.sent_counter:ind]
-                reversed_data = reversed_data[::-1].replace('\\', '\\\\').replace('/', '\\/')
-                reversed_data = reversed_data + '\n'
-                message = f'/data/{self.session}/{self.sent_counter}/{reversed_data}/'
-                self.messages_unacked[ind] = message
-                self.send_message(message)
+                reversed_data = reversed_data[::-1] + '\n'
+                split_size = 512
+                if len(reversed_data) > split_size:
+                    messages = [reversed_data[split_size*m:split_size*(m+1)] for m in range(ceil(len(reversed_data) / split_size))]
+                    for i, data in enumerate(messages):
+                        message_offset = self.sent_counter + (split_size * i)
+                        data = data.replace('\\', '\\\\').replace('/', '\\/')
+                        message = f'/data/{self.session}/{message_offset}/{data}/'
+                        self.messages_unacked[message_offset+split_size] = message
+                        self.send_message(message)
+                else:
+                    reversed_data = reversed_data.replace('\\', '\\\\').replace('/', '\\/')
+                    message = f'/data/{self.session}/{self.sent_counter}/{reversed_data}/'
+                    self.messages_unacked[ind] = message
+                    self.send_message(message)
                 self.sent_counter = ind+1
             except ValueError:
                 searching = False
@@ -82,7 +85,6 @@ class Session:
         self.check_for_line()
 
     def send_message(self, message):
-        self.last_message = message
         logger.info(f"Message Sent: {message.encode()}")
         try:
             self.transport.sendto(message.encode(), self.addr)
@@ -108,9 +110,10 @@ class Data:
         self.ord = int(parts[3])if parts[3].isdigit() else 0
         if self.ord > 2147483648 or self.ord < 0:
             raise ValueError
-        self.message = parts[4][:-1].replace('\\/', '/').replace('\\\\', '\\') if len(parts) > 4 else ''
+        self.message = parts[4][:-1] if len(parts) > 4 else ''
         if re.findall(r"(?<!\\)/", self.message):
             raise ValueError
+        self.message = self.message.replace('\\/', '/').replace('\\\\', '\\')
 
 
 class LineReversal:
@@ -129,9 +132,8 @@ class LineReversal:
         if message.startswith('/') and message.endswith('/'):
             try:
                 message_data = Data(message)
-            except IndexError:
-                return
-            except ValueError:
+            except (IndexError, ValueError):
+                logger.error('Invalid Message')
                 return
             if message_data.command == "connect":
                 session = self.sessions.get(message_data.session, Session(addr, self.transport, message_data.session))
@@ -142,9 +144,10 @@ class LineReversal:
                 session.data[message_data.ord] = message_data.message
                 session.check_for_line()
             elif message_data.command == "close":
-                session = self.sessions[message_data.session]
-                session.closed = True
-                session.send_closed_message()
+                if message_data.session in self.sessions:
+                    session = self.sessions[message_data.session]
+                    session.closed = True
+                    session.send_closed_message()
             elif message_data.command == "ack" and message_data.session in self.sessions:
                 session = self.sessions[message_data.session]
                 session.last_message_time = datetime.now()
