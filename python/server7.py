@@ -186,8 +186,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info('Quitting')
         quit()
-    # server = LineReversal()
-    # server.datagram_received(b'/connect/1104745362/', None)
-    # # server.datagram_received(b'/data/1104745362/0/hello\n/', None)
-    # server.datagram_received(b'/data/1104745362/0/foo\\/bar\\/baz\nfoo\\\\bar\\\\baz\n/', None)
-
