@@ -31,7 +31,8 @@ class Session:
     async def timeout_check(self):
         while datetime.now() - self.last_message_time < timedelta(seconds=60) and not self.closed:
             await asyncio.sleep(3)
-            if datetime.now() - self.last_message_time > timedelta(seconds=3) and self.last_message:
+            if self.messages_unacked:
+                logger.info(f"{self.session} - Resending {len(self.messages_unacked)} messages")
                 for message in self.messages_unacked.values():
                     self.send_message(message)
         self.closed = True
@@ -74,7 +75,7 @@ class Session:
                 else:
                     reversed_data = reversed_data.replace('\\', '\\\\').replace('/', '\\/')
                     message = f'/data/{self.session}/{self.sent_counter}/{reversed_data}/'
-                    self.messages_unacked[ind] = message
+                    self.messages_unacked[ind+1] = message
                     self.send_message(message)
                 self.sent_counter = ind+1
             except ValueError:
@@ -151,12 +152,12 @@ class LineReversal:
             elif message_data.command == "ack" and message_data.session in self.sessions:
                 session = self.sessions[message_data.session]
                 session.last_message_time = datetime.now()
+                logger.info(f'ACK {message_data.session} {session.messages_unacked}')
                 if message_data.ord in session.messages_unacked:
+                    logger.info(f"{message_data.session}: ACK {message_data.ord} {session.messages_unacked}")
                     del(session.messages_unacked[message_data.ord])
                 if session.closed:
                     session.send_closed_message()
-                elif message_data.ord <= session.largest_ack:
-                    pass
                 elif message_data.ord > session.sent_counter:
                     session.closed = True
                     session.send_closed_message()
