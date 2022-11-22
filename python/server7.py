@@ -34,14 +34,15 @@ class Session:
             if self.messages_unacked:
                 logger.info(f"{self.session} - Resending {len(self.messages_unacked)} messages")
                 for message in self.messages_unacked.values():
-                    self.send_message(message)
+                    self.send_message(message, log_messages=False)
         self.closed = True
 
-    def ack(self):
+    def connect(self):
         message = f"/ack/{self.session}/0/"
         self.send_message(message)
 
-    def send_closed_message(self):
+    def close_session(self):
+        self.closed = True
         message = f"/close/{self.session}/"
         self.send_message(message)
 
@@ -53,9 +54,9 @@ class Session:
                 self.buffer += v
                 to_remove.append(k)
             elif k < len(self.buffer):
-                self.buffer = self.buffer[:k] + v + (self.buffer[k+len(v):] if k + len(v) < len(self.buffer) else '')
+                self.buffer = self.buffer[:k] + v + (self.buffer[k + len(v):] if k + len(v) < len(self.buffer) else '')
         for k in to_remove:
-            del(self.data[k])
+            del (self.data[k])
         self.send_message(f'/ack/{self.session}/{len(self.buffer)}/')
         searching = True
         while searching:
@@ -65,19 +66,20 @@ class Session:
                 reversed_data = reversed_data[::-1] + '\n'
                 split_size = 512
                 if len(reversed_data) > split_size:
-                    messages = [reversed_data[split_size*m:split_size*(m+1)] for m in range(ceil(len(reversed_data) / split_size))]
+                    messages = [reversed_data[split_size * m:split_size * (m + 1)] for m in
+                                range(ceil(len(reversed_data) / split_size))]
                     for i, data in enumerate(messages):
                         message_offset = self.sent_counter + (split_size * i)
                         data = data.replace('\\', '\\\\').replace('/', '\\/')
                         message = f'/data/{self.session}/{message_offset}/{data}/'
-                        self.messages_unacked[message_offset+split_size] = message
+                        self.messages_unacked[message_offset + split_size] = message
                         self.send_message(message)
                 else:
                     reversed_data = reversed_data.replace('\\', '\\\\').replace('/', '\\/')
                     message = f'/data/{self.session}/{self.sent_counter}/{reversed_data}/'
-                    self.messages_unacked[ind+1] = message
+                    self.messages_unacked[ind + 1] = message
                     self.send_message(message)
-                self.sent_counter = ind+1
+                self.sent_counter = ind + 1
             except ValueError:
                 searching = False
 
@@ -85,8 +87,9 @@ class Session:
         self.sent_counter = ind
         self.check_for_line()
 
-    def send_message(self, message):
-        logger.info(f"Message Sent: {message.encode()}")
+    def send_message(self, message, log_messages=True):
+        if log_messages:
+            logger.info(f"Message Sent: {message.encode()}")
         try:
             self.transport.sendto(message.encode(), self.addr)
             self.transport.sendto(message.encode(), self.addr)
@@ -108,7 +111,7 @@ class Data:
         self.session = parts[2]
         if int(self.session) > 2147483648 or int(self.session) < 0:
             raise ValueError
-        self.ord = int(parts[3])if parts[3].isdigit() else 0
+        self.ord = int(parts[3]) if parts[3].isdigit() else 0
         if self.ord > 2147483648 or self.ord < 0:
             raise ValueError
         self.message = parts[4][:-1] if len(parts) > 4 else ''
@@ -136,33 +139,38 @@ class LineReversal:
             except (IndexError, ValueError):
                 logger.error('Invalid Message')
                 return
-            if message_data.command == "connect":
-                session = self.sessions.get(message_data.session, Session(addr, self.transport, message_data.session))
-                self.sessions[message_data.session] = session
-                session.ack()
-            elif message_data.command == "data" and message_data.session in self.sessions:
-                session = self.sessions[message_data.session]
-                session.data[message_data.ord] = message_data.message
-                session.check_for_line()
-            elif message_data.command == "close":
-                if message_data.session in self.sessions:
-                    session = self.sessions[message_data.session]
-                    session.closed = True
-                    session.send_closed_message()
-            elif message_data.command == "ack" and message_data.session in self.sessions:
-                session = self.sessions[message_data.session]
-                session.last_message_time = datetime.now()
-                logger.info(f'ACK {message_data.session} {session.messages_unacked}')
-                if message_data.ord in session.messages_unacked:
-                    logger.info(f"{message_data.session}: ACK {message_data.ord} {session.messages_unacked}")
-                    del(session.messages_unacked[message_data.ord])
-                if session.closed:
-                    session.send_closed_message()
-                elif message_data.ord > session.sent_counter:
-                    session.closed = True
-                    session.send_closed_message()
-                elif message_data.ord < session.sent_counter:
-                    session.resend_data(message_data.ord)
+            match message_data.command:
+                case "connect":
+                    self.sessions[message_data.session] = self.sessions.get(message_data.session,
+                                                                            Session(addr, self.transport,
+                                                                                    message_data.session))
+                    self.sessions[message_data.session].connect()
+                case "data":
+                    try:
+                        session = self.sessions[message_data.session]
+                        session.data[message_data.ord] = message_data.message
+                        session.check_for_line()
+                    except KeyError:
+                        logger.error("Invalid Session for data")
+                case "close":
+                    try:
+                        self.sessions[message_data.session].close_session()
+                    except KeyError:
+                        logger.error("Invalid Session to close")
+                case "ack":
+                    if message_data.session in self.sessions:
+                        session = self.sessions[message_data.session]
+                        session.last_message_time = datetime.now()
+                        logger.info(f'ACK {message_data.session} {len(session.messages_unacked)}')
+                        if message_data.ord in session.messages_unacked:
+                            logger.info(f"{message_data.session}: ACK {message_data.ord} {session.messages_unacked}")
+                            del (session.messages_unacked[message_data.ord])
+                        if session.closed:
+                            session.close_session()
+                        elif message_data.ord > session.sent_counter:
+                            session.close_session()
+                        elif message_data.ord < session.sent_counter:
+                            session.resend_data(message_data.ord)
 
     def connection_lost(self, addr):
         """ Do Nothing on Connection Lost"""
