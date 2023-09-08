@@ -8,4 +8,3 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 bit_reverse = "0.1.8"
-hex = "0.4.3"
