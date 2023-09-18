@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use enum_as_inner::EnumAsInner;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
-use dashmap::DashMap;
+use tokio::time::sleep;
 
 const AUTHORITY_SERVER: &str = "pestcontrol.protohackers.com:20547";
 
@@ -176,10 +177,6 @@ struct Policy {
     action: u8
 }
 
-struct Target {
-    min: u32,
-    max: u32,
-}
 
 #[non_exhaustive]
 struct PolicyAction;
@@ -192,30 +189,17 @@ impl PolicyAction {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    // let e = create_hello();
-    // println!("{e:?}");
-    // let v = verify_checksum(&e);
-    // println!("verified: {v:?}");
-    // let s = serialise_message(&e);
-    // let hex_string: String = s.iter()
-    //     .map(|byte| format!("{:02X}", byte))
-    //     .collect::<Vec<String>>()
-    //     .join(" ");
-    // println!("serialised: {hex_string:?}");
-    // let w = String::from_utf8_lossy(&e.as_hello().unwrap().protocol);
-    // println!("{w:?}");
-
     let listener = TcpListener::bind("0.0.0.0:40000").await?;
     println!("Listening on port 40000");
 
 
     // let authorities:Arc<Mutex<HashMap<u32, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    let active_policies: DashMap<u32, Arc<Mutex<HashMap<String, Policy>>>> = DashMap::new();
+    let active_policies: Arc<Mutex<HashMap<u32, Arc<Mutex<HashMap<String, Policy>>>>>> = Arc::new(Mutex::new(HashMap::new()));
     loop {
         let (stream, addr) = listener.accept().await?;
         let active_policies  = active_policies.clone();
-        println!("Connection received: {:?}", addr);
+        println!("{addr:?} Connection received");
         tokio::spawn(handle_client(stream, active_policies, addr));
     }
 }
@@ -303,7 +287,7 @@ fn serialise_message(message: &Message) -> Vec<u8>{
 
 async fn handle_client(
     mut stream: TcpStream,
-    active_policies: DashMap<u32, Arc<Mutex<HashMap<String, Policy>>>>,
+    active_policies: Arc<Mutex<HashMap<u32, Arc<Mutex<HashMap<String, Policy>>>>>>,
     addr: SocketAddr
 ) {
     // Buffer to store incoming messages
@@ -311,23 +295,28 @@ async fn handle_client(
     // Read from the stream
     // let n = stream.read(&mut buffer).await.expect("failed to read data");
     let mut site_policies: HashMap<SiteId, HashMap<String, PopulationPolicy>> = HashMap::new();
+    stream.write_all(&*serialise_message(&create_hello())).await.unwrap();
     loop {
         // Handle the incoming data based on message type
-        println!("{addr} Waiting for message");
+        // println!("{addr} Waiting for message");
         let message = get_message(&mut stream).await;
         println!("{addr} {message:?}");
         match message {
-            Message::Hello(_) => {
-                stream.write_all(&*serialise_message(&create_hello())).await.unwrap();
+            Message::Hello(_) => {}
+            Message::Error(message) => {
+                stream.write_all(&*serialise_message(&Message::Error(message.clone()))).await.unwrap();
+                stream.flush().await.unwrap();
+                println!("{addr} Error Written: {message:?}");
+                sleep(Duration::from_secs(1)).await;
+                return;
             }
-            Message::Error(_) => {}
             Message::OK(_) => {}
             Message::DialAuthority(_) => {}
             Message::TargetPopulations(_) => {}
             Message::CreatePolicy(_) => {}
             Message::DeletePolicy(_) => {}
             Message::PolicyResult(_) => {}
-            Message::SiteVisit(message) => {
+            Message::SiteVisit(mut message) => {
                 println!("{addr} Start Visit");
                 let site_policies = match site_policies.get(&message.site) {
                     Some(policies) => {policies}
@@ -340,6 +329,31 @@ async fn handle_client(
                     }
                 };
 
+                for (policy_name, _policy) in site_policies {
+                    match message.populations.iter().find(|x| String::from_utf8_lossy(&*x.species).to_string() == *policy_name) {
+                        None => {
+                            let population = PopulationCount{ species: Vec::from(policy_name.as_bytes()), count: 0 };
+                            message.populations.push(population)
+                        }
+                        Some(_) => {}
+                    }
+                }
+
+                let active_site_policies = {
+                    let mut active_policies = active_policies.lock().await;
+                    let asp = match active_policies.get_mut(&message.site) {
+                        Some(active_policies) => { active_policies.clone() },
+                        None => {
+                            active_policies.insert(message.site.clone(), Arc::new(Mutex::new(HashMap::new())));
+                            active_policies.get_mut(&message.site).unwrap().clone()
+                        }
+                    };
+                    asp
+                };
+
+
+                let mut active_site_policies = active_site_policies.lock().await;
+
                 for population in message.populations{
 
                     let species_string = String::from_utf8_lossy(&population.species).to_string();
@@ -349,15 +363,6 @@ async fn handle_client(
                         Some(policy) => {policy}
                     };
 
-
-                    let active_site_policies = match active_policies.get_mut(&message.site) {
-                        Some(active_policies) => {active_policies.clone()},
-                        None => {
-                            active_policies.insert(message.site.clone(), Arc::new(Mutex::new(HashMap::new())));
-                            active_policies.get_mut(&message.site).unwrap().clone()
-                        }
-                    };
-                    let mut active_site_policies = active_site_policies.lock().await;
                     match population.count {
                         x if x < species_policy.min => {
                             match active_site_policies.get(&species_string) {
@@ -451,12 +456,21 @@ async fn handshake_authority(site_id: &u32) -> (HashMap<String, PopulationPolicy
     authority.write_all(&*dial_authority).await.unwrap();
 
     let response = get_message(&mut authority).await;
-    let target_populations = response.as_target_populations().unwrap();
-    let mut policies = HashMap::new();
-    for policy in &target_populations.populations {
-        policies.insert(String::from_utf8_lossy(&policy.species).to_string(), policy.clone());
-    }
-    (policies, authority)
+    let policies = match response.as_target_populations(){
+        None => {
+            eprintln!("Error on handshake: {response:?}");
+            HashMap::new()
+        }
+        Some(target_populations) => {
+            let mut policies = HashMap::new();
+            for policy in &target_populations.populations {
+                policies.insert(String::from_utf8_lossy(&policy.species).to_string(), policy.clone());
+            }
+            policies
+        }
+    };
+
+    return (policies, authority)
 }
 
 
@@ -501,23 +515,28 @@ async fn handle_hello(stream: &mut TcpStream) -> Message {
     let id:u8 = 0x50;
     let length = stream.read_u32().await.unwrap();
     let protocol_length = stream.read_u32().await.unwrap();
+    if protocol_length + 14 != length{
+        return create_error("Hello: Invalid length")
+    }
     let mut protocol = Vec::new();
+    if protocol_length > length {
+        return create_error("Hello: Invalid Protocol Length")
+    }
     for _ in 0..protocol_length{
         protocol.push(stream.read_u8().await.unwrap());
     }
     let version = stream.read_u32().await.unwrap();
     let checksum = stream.read_u8().await.unwrap();
-    let message = Message::Hello(Hello{id, length, protocol, version, checksum});
-    // println!("{:?}", message);
-    if verify_message(&message){
-        return message
+    let valid_hello = create_hello();
+    let valid_hello = valid_hello.as_hello().unwrap();
+    if protocol != valid_hello.protocol {
+        return create_error("Hello: Invalid protocol")
     }
-    Message::Error(Error{
-        id: 51,
-        length: 0x0d,
-        message: vec![0x62, 0x61, 0x64],
-        checksum: 0x78,
-    })
+    if version != valid_hello.version {
+        return create_error("Hello: Invalid version")
+    }
+
+    Message::Hello(Hello{id, length, protocol, version, checksum})
 }
 
 async fn handle_error(stream: &mut TcpStream) -> Message {
@@ -635,6 +654,9 @@ async fn handle_site_visit(stream: &mut TcpStream) -> Message {
     let site = stream.read_u32().await.unwrap();
     let population_count = stream.read_u32().await.unwrap();
     let mut populations = Vec::new();
+    if population_count > length {
+        return create_error("SiteVisit: Invalid population length")
+    }
     for _ in 0..population_count {
         let species_length = stream.read_u32().await.unwrap();
         let mut species = Vec::new();
@@ -645,13 +667,26 @@ async fn handle_site_visit(stream: &mut TcpStream) -> Message {
         populations.push(PopulationCount{species, count });
     }
     let checksum = stream.read_u8().await.unwrap();
-    Message::SiteVisit(SiteVisit{
+    let site_visit = SiteVisit{
         id,
         length,
         site,
         populations,
         checksum
-    })
+    };
+    let mut pop_check = HashMap::new();
+    for population in &site_visit.populations {
+        if pop_check.contains_key(&*population.species){
+            let current_count = pop_check.get(&*population.species).unwrap();
+            if *current_count != population.count {
+                return create_error("SiteVisit: Population Mismatch")
+            }
+        } else {
+            pop_check.insert(population.species.clone(), population.count.clone());
+        }
+
+    }
+    Message::SiteVisit(site_visit)
 }
 
 
@@ -683,17 +718,6 @@ fn create_error(msg: &str) -> Message {
     Message::Error(error)
 }
 
-fn create_ok() -> Message {
-    let id = 0x52;
-    let length = 6;
-    let checksum = 0xa8;
-    Message::OK(OK{
-        id,
-        length,
-        checksum,
-    })
-}
-
 fn create_dial_authority(site: &u32) -> Message{
     let id: u8 = 0x53;
     let length: u32 = 10;
@@ -715,40 +739,6 @@ fn create_dial_authority(site: &u32) -> Message{
     });
     dial_authority
 }
-
-fn create_target_populations(site: u32, populations: Vec<PopulationPolicy>) -> Message {
-    let id = 0x54;
-    let mut length: u32 = 14;
-    let mut checksum= [
-        length.to_be_bytes(),
-        (populations.len() as u32).to_be_bytes()
-    ]
-        .iter()
-        .flatten()
-        .chain([&id])
-        .fold(0u8, |acc, &byte| acc.wrapping_add(byte));
-    for policy in populations.iter() {
-        length += policy.species.len() as u32 + 12;
-        checksum = checksum.wrapping_add([
-            (policy.species.len() as u32).to_be_bytes(),
-            policy.min.to_be_bytes(),
-            policy.max.to_be_bytes()
-        ]
-            .iter()
-            .flatten()
-            .chain(policy.species.iter())
-            .fold(0u8, |acc, &byte| acc.wrapping_add(byte)));
-    }
-    checksum = 0u8.wrapping_sub(checksum);
-    Message::TargetPopulations(TargetPopulations{
-        id,
-        length,
-        site,
-        populations,
-        checksum,
-    })
-}
-
 fn create_create_policy(species: Vec<u8>, action: u8) -> Message{
     let id = 0x55;
     let length = species.len() as u32 + 11;
