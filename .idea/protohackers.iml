@@ -26,7 +26,7 @@
       <excludeFolder url="file://$MODULE_DIR$/rust/server09/target" />
       <excludeFolder url="file://$MODULE_DIR$/rust/Server11/target" />
     </content>
-    <orderEntry type="jdk" jdkName="Remote Python 3.11.0 (/home/ajurna/.virtualenvs/protohackers/bin/python)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Poetry (protohackers)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
